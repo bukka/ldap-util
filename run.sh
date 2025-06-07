@@ -58,6 +58,8 @@ if [ "$LDAP_VERSION" != "$(ls /usr/local/ldap/ | head -1)" ] && netstat -ln 2>/d
     echo "Note: Using alternate ports $LDAP_PORT/$LDAPS_PORT (default ports busy)"
 fi
 LDAPI_SOCKET="$RUN_DIR/ldapi"
+# Properly encode LDAPI path for URL
+LDAPI_URL="ldapi://$(echo "$LDAPI_SOCKET" | sed 's|/|%2F|g')"
 
 # Check if LDAP installation exists
 if [ ! -x "$LDAP_PREFIX/libexec/slapd" ]; then
@@ -213,7 +215,7 @@ alias ldapmodify-local='$LDAP_PREFIX/bin/ldapmodify -H ldap://localhost:$LDAP_PO
 echo "LDAP Environment loaded for $INSTANCE_NAME"
 echo "  LDAP URL:  ldap://localhost:$LDAP_PORT"
 echo "  LDAPS URL: ldaps://localhost:$LDAPS_PORT"
-echo "  LDAPI:     ldapi://$LDAPI_SOCKET"
+echo "  LDAPI:     $LDAPI_URL"
 echo "  Admin DN:  cn=Manager,dc=my-domain,dc=com"
 echo "  Password:  secret"
 echo ""
@@ -231,7 +233,7 @@ add_php_test_data() {
     echo "Adding PHP test data..."
     
     # Add test entries that PHP tests expect
-    $LDAP_PREFIX/bin/ldapadd -H "ldapi://$LDAPI_SOCKET" -D cn=Manager,dc=my-domain,dc=com -w secret << EOF || true
+    $LDAP_PREFIX/bin/ldapadd -H "$LDAPI_URL" -D cn=Manager,dc=my-domain,dc=com -w secret << EOF || true
 dn: o=test,dc=my-domain,dc=com
 objectClass: top
 objectClass: organization
@@ -273,10 +275,10 @@ bootstrap_config() {
     
     # Start temporary slapd for configuration
     echo "Starting bootstrap slapd..."
-    echo "Command: $LDAP_PREFIX/libexec/slapd -f $CONFIG_DIR/slapd-bootstrap.conf -h ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT ldapi://$LDAPI_SOCKET"
+    echo "Command: $LDAP_PREFIX/libexec/slapd -f $CONFIG_DIR/slapd-bootstrap.conf -h ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT $LDAPI_URL"
     
     $LDAP_PREFIX/libexec/slapd -f "$CONFIG_DIR/slapd-bootstrap.conf" \
-        -h "ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT ldapi://$LDAPI_SOCKET" \
+        -h "ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT $LDAPI_URL" \
         -d 256 &
     local bootstrap_pid=$!
     
@@ -323,7 +325,7 @@ bootstrap_config() {
     
     # Configure TLS and modules
     echo "Configuring TLS and modules..."
-    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "ldapi://$LDAPI_SOCKET" << EOF || true
+    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: cn=config
 changetype: modify
 add: olcTLSCACertificateFile
@@ -347,7 +349,7 @@ EOF
 
     # Load modules if they exist
     echo "Loading modules..."
-    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "ldapi://$LDAPI_SOCKET" << EOF || true
+    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: cn=module{0},cn=config
 changetype: modify
 add: olcModuleLoad
@@ -362,9 +364,9 @@ EOF
 
     # Add overlays
     echo "Adding overlays..."
-    DBDN=$($LDAP_PREFIX/bin/ldapsearch -Q -LLL -Y EXTERNAL -H "ldapi://$LDAPI_SOCKET" -b cn=config '(&(olcRootDN=*)(olcSuffix=*))' dn 2>/dev/null | grep -i '^dn:' | sed -e 's/^dn:\s*//' || echo "olcDatabase={1}mdb,cn=config")
+    DBDN=$($LDAP_PREFIX/bin/ldapsearch -Q -LLL -Y EXTERNAL -H "$LDAPI_URL" -b cn=config '(&(olcRootDN=*)(olcSuffix=*))' dn 2>/dev/null | grep -i '^dn:' | sed -e 's/^dn:\s*//' || echo "olcDatabase={1}mdb,cn=config")
     
-    $LDAP_PREFIX/bin/ldapadd -Q -Y EXTERNAL -H "ldapi://$LDAPI_SOCKET" << EOF || true
+    $LDAP_PREFIX/bin/ldapadd -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: olcOverlay=sssvlv,$DBDN
 objectClass: olcOverlayConfig
 objectClass: olcSssVlvConfig
@@ -385,7 +387,7 @@ EOF
 
     # Configure database index
     echo "Configuring database index..."
-    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "ldapi://$LDAPI_SOCKET" << EOF || true
+    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: $DBDN
 changetype: modify
 add: olcDbIndex
@@ -393,7 +395,7 @@ olcDbIndex: entryExpireTimestamp eq
 EOF
 
     # Add base entry - exactly as in PHP CI script
-    $LDAP_PREFIX/bin/ldapadd -H "ldapi://$LDAPI_SOCKET" -D cn=Manager,dc=my-domain,dc=com -w secret << EOF || true
+    $LDAP_PREFIX/bin/ldapadd -H "$LDAPI_URL" -D cn=Manager,dc=my-domain,dc=com -w secret << EOF || true
 dn: dc=my-domain,dc=com
 objectClass: top
 objectClass: organization
@@ -439,7 +441,7 @@ start_slapd() {
     # Start slapd in foreground with debug output
     exec $LDAP_PREFIX/libexec/slapd \
         -F "$CONFIG_DIR/slapd.d" \
-        -h "ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT ldapi://$LDAPI_SOCKET" \
+        -h "ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT $LDAPI_URL" \
         -d 256
 }
 
@@ -453,6 +455,7 @@ show_status() {
     echo "  LDAP port: $LDAP_PORT"
     echo "  LDAPS port: $LDAPS_PORT"
     echo "  LDAPI socket: $LDAPI_SOCKET"
+    echo "  LDAPI URL: $LDAPI_URL"
     
     if is_running; then
         local pid=$(get_slapd_pid)
