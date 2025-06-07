@@ -1,1 +1,4 @@
 openldap*
+data/
+run/
+etc/

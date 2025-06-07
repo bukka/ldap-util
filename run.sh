@@ -156,8 +156,6 @@ init_config() {
     cat > "$CONFIG_DIR/slapd-bootstrap.conf" << EOF
 # Bootstrap configuration for $INSTANCE_NAME
 include $LDAP_PREFIX/etc/openldap/schema/core.schema
-include $LDAP_PREFIX/etc/openldap/schema/cosine.schema
-include $LDAP_PREFIX/etc/openldap/schema/inetorgperson.schema
 
 pidfile $RUN_DIR/slapd.pid
 argsfile $RUN_DIR/slapd.args
@@ -175,9 +173,9 @@ suffix "dc=my-domain,dc=com"
 rootdn "cn=Manager,dc=my-domain,dc=com"
 rootpw secret
 directory $DATA_DIR
+maxsize 1073741824
 
 index objectClass eq
-index entryExpireTimestamp eq
 EOF
 
     # Create client configuration
@@ -269,19 +267,55 @@ l: there
 l: Antarctica
 EOF
 }
+# Function to bootstrap cn=config
 bootstrap_config() {
     echo "Bootstrapping cn=config for $INSTANCE_NAME..."
     
     # Start temporary slapd for configuration
+    echo "Starting bootstrap slapd..."
+    echo "Command: $LDAP_PREFIX/libexec/slapd -f $CONFIG_DIR/slapd-bootstrap.conf -h ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT ldapi://$LDAPI_SOCKET"
+    
     $LDAP_PREFIX/libexec/slapd -f "$CONFIG_DIR/slapd-bootstrap.conf" \
-        -h "ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT ldapi://$LDAPI_SOCKET" &
+        -h "ldap://localhost:$LDAP_PORT ldaps://localhost:$LDAPS_PORT ldapi://$LDAPI_SOCKET" \
+        -d 256 &
     local bootstrap_pid=$!
     
-    sleep 3
+    echo "Bootstrap PID: $bootstrap_pid"
+    sleep 5
     
     if ! kill -0 $bootstrap_pid 2>/dev/null; then
         echo "Error: Bootstrap slapd failed to start"
+        echo "Checking bootstrap config file:"
+        cat "$CONFIG_DIR/slapd-bootstrap.conf"
+        echo ""
+        echo "Checking if ports are available:"
+        netstat -ln | grep -E ":$LDAP_PORT |:$LDAPS_PORT " || echo "Ports appear to be free"
+        echo ""
+        echo "Checking slapd binary:"
+        ls -la "$LDAP_PREFIX/libexec/slapd"
+        echo ""
+        echo "Library path: $LD_LIBRARY_PATH"
+        ldd "$LDAP_PREFIX/libexec/slapd" | head -10
         return 1
+    fi
+    
+    echo "Bootstrap slapd started successfully"
+    
+    # Test basic connectivity
+    echo "Testing bootstrap connectivity..."
+    local test_count=0
+    while [ $test_count -lt 10 ]; do
+        if $LDAP_PREFIX/bin/ldapsearch -H "ldap://localhost:$LDAP_PORT" -x -s base -b "" >/dev/null 2>&1; then
+            echo "Bootstrap connectivity OK"
+            break
+        fi
+        echo "Waiting for bootstrap slapd to be ready... ($test_count/10)"
+        sleep 2
+        test_count=$((test_count + 1))
+    done
+    
+    if [ $test_count -eq 10 ]; then
+        echo "Warning: Bootstrap slapd not responding to queries"
     fi
     
     # Configure via LDAPI
@@ -372,6 +406,7 @@ EOF
     add_php_test_data
 
     # Stop bootstrap slapd
+    echo "Stopping bootstrap slapd..."
     kill $bootstrap_pid
     wait $bootstrap_pid 2>/dev/null || true
 }
