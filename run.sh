@@ -1,10 +1,8 @@
 #!/bin/bash
-
 set -e
 
 # OpenLDAP Version Manager Script
-# Usage: ./start_ldap.sh <ldap_version> [ssl_version] [action]
-# Example: ./start_ldap.sh openldap-2.6 30 start
+# Usage: ./run.sh <ldap_version> <action> [ssl_version] [options]
 
 if [ $# -lt 2 ]; then
     echo "Usage: $0 <ldap_version> <action> [ssl_version] [options]"
@@ -55,6 +53,13 @@ SSL_DIR="$CONFIG_DIR/ssl"
 RUN_DIR="$SCRIPT_DIR/run/$INSTANCE_NAME"
 STATE_FILE="$RUN_DIR/instance.state"
 
+# Check if LDAP installation exists
+if [ ! -x "$LDAP_PREFIX/libexec/slapd" ]; then
+    echo "Error: LDAP installation not found at $LDAP_PREFIX"
+    echo "Please build and install OpenLDAP first."
+    exit 1
+fi
+
 # Function to save instance state
 save_state() {
     mkdir -p "$RUN_DIR"
@@ -67,7 +72,7 @@ INSTANCE_NAME=$INSTANCE_NAME
 LDAP_PREFIX=$LDAP_PREFIX
 SSL_VERSION=$SSL_VERSION
 STARTED=$(date '+%Y-%m-%d %H:%M:%S')
-PID=$(get_slapd_pid)
+PID=$(get_slapd_pid 2>/dev/null || echo "")
 EOF
 }
 
@@ -94,7 +99,7 @@ get_ports() {
     LDAPS_PORT=636
 
     # If default ports are in use, add offset for different versions
-    if [ "$LDAP_VERSION" != "$(ls /usr/local/ldap/ | head -1)" ] && netstat -ln 2>/dev/null | grep -q ":$LDAP_PORT "; then
+    if [ "$LDAP_VERSION" != "$(ls /usr/local/ldap/ 2>/dev/null | head -1)" ] && netstat -ln 2>/dev/null | grep -q ":$LDAP_PORT "; then
         case "$LDAP_VERSION" in
             *2.5*) PORT_OFFSET=0 ;;
             *2.6*) PORT_OFFSET=10 ;;
@@ -112,12 +117,6 @@ get_ports() {
 
 # Initialize ports
 get_ports
-
-if [ ! -x "$LDAP_PREFIX/libexec/slapd" ]; then
-    echo "Error: LDAP installation not found at $LDAP_PREFIX"
-    echo "Please build and install OpenLDAP first."
-    exit 1
-fi
 
 # Set library path
 export LD_LIBRARY_PATH="$LDAP_PREFIX/lib64:/usr/local/ssl$SSL_VERSION/lib64:$LD_LIBRARY_PATH"
@@ -182,12 +181,12 @@ generate_cert() {
     alt_names() {
         (
             (
-                (hostname && hostname -a && hostname -A && hostname -f) |
+                (hostname && hostname -a && hostname -A && hostname -f) 2>/dev/null |
                 xargs -n 1 |
                 sort -u |
                 sed -e 's/\(\S\+\)/DNS:\1/g'
             ) && (
-                (hostname -i && hostname -I && echo "127.0.0.1 ::1") |
+                (hostname -i && hostname -I && echo "127.0.0.1 ::1") 2>/dev/null |
                 xargs -n 1 |
                 sort -u |
                 sed -e 's/\(\S\+\)/IP:\1/g'
@@ -234,7 +233,7 @@ database config
 rootdn "cn=config"
 rootpw secret
 # Allow EXTERNAL SASL to have admin access
-authz-regexp uid=([^,]*),cn=gssapi,cn=auth cn=$1,cn=config
+authz-regexp uid=([^,]*),cn=gssapi,cn=auth cn=\$1,cn=config
 authz-regexp gidNumber=0\\\+uidNumber=0,cn=peercred,cn=external,cn=auth cn=config
 
 # Main database
@@ -337,6 +336,7 @@ l: there
 l: Antarctica
 EOF
 }
+
 # Function to bootstrap cn=config
 bootstrap_config() {
     echo "Bootstrapping cn=config for $INSTANCE_NAME..."
@@ -359,7 +359,7 @@ bootstrap_config() {
         cat "$CONFIG_DIR/slapd-bootstrap.conf"
         echo ""
         echo "Checking if ports are available:"
-        netstat -ln | grep -E ":$LDAP_PORT |:$LDAPS_PORT " || echo "Ports appear to be free"
+        netstat -ln 2>/dev/null | grep -E ":$LDAP_PORT |:$LDAPS_PORT " || echo "Ports appear to be free"
         echo ""
         echo "Checking slapd binary:"
         ls -la "$LDAP_PREFIX/libexec/slapd"
@@ -390,9 +390,6 @@ bootstrap_config() {
     
     # Configure via LDAPI
     echo "Configuring TLS and modules..."
-    
-    # Configure TLS and modules
-    echo "Configuring TLS and modules..."
     $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: cn=config
 changetype: modify
@@ -405,7 +402,7 @@ olcTLSCertificateFile: $SSL_DIR/server.crt
 add: olcTLSCertificateKeyFile
 olcTLSCertificateKeyFile: $SSL_DIR/server.key
 -
-add: olcTLSVerifyClient
+replace: olcTLSVerifyClient
 olcTLSVerifyClient: never
 -
 add: olcAuthzRegexp
@@ -432,7 +429,14 @@ EOF
 
     # Add overlays
     echo "Adding overlays..."
-    DBDN=$($LDAP_PREFIX/bin/ldapsearch -Q -LLL -Y EXTERNAL -H "$LDAPI_URL" -b cn=config '(&(olcRootDN=*)(olcSuffix=*))' dn 2>/dev/null | grep -i '^dn:' | sed -e 's/^dn:\s*//' || echo "olcDatabase={1}mdb,cn=config")
+    DBDN=$($LDAP_PREFIX/bin/ldapsearch -Q -LLL -Y EXTERNAL -H "$LDAPI_URL" -b cn=config '(&(olcRootDN=*)(olcSuffix=*))' dn 2>/dev/null | grep -i '^dn:' | sed -e 's/^dn:\s*//')
+    
+    if [ -z "$DBDN" ]; then
+        echo "Warning: Could not find database DN, using default"
+        DBDN="olcDatabase={1}mdb,cn=config"
+    fi
+    
+    echo "Using database DN: $DBDN"
     
     $LDAP_PREFIX/bin/ldapadd -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: olcOverlay=sssvlv,$DBDN
@@ -499,6 +503,10 @@ cn: config
 olcArgsFile: $RUN_DIR/slapd.args
 olcPidFile: $RUN_DIR/slapd.pid
 olcLogLevel: -1
+olcTLSCACertificateFile: $SSL_DIR/server.crt
+olcTLSCertificateFile: $SSL_DIR/server.crt
+olcTLSCertificateKeyFile: $SSL_DIR/server.key
+olcTLSVerifyClient: never
 structuralObjectClass: olcGlobal
 EOF
     fi
@@ -521,7 +529,7 @@ start_slapd() {
     echo "Starting $INSTANCE_NAME in foreground..."
     echo "  LDAP:  ldap://localhost:$LDAP_PORT"
     echo "  LDAPS: ldaps://localhost:$LDAPS_PORT"
-    echo "  LDAPI: ldapi://$LDAPI_SOCKET"
+    echo "  LDAPI: $LDAPI_URL"
     echo ""
     echo "Press Ctrl+C to stop"
     echo ""
@@ -570,6 +578,13 @@ show_status() {
     
     if [ -f "$CONFIG_DIR/ldap_env.sh" ]; then
         echo "  Environment: $CONFIG_DIR/ldap_env.sh"
+    fi
+    
+    if [ -f "$STATE_FILE" ]; then
+        echo "  State file: $STATE_FILE"
+        if load_state; then
+            echo "  Last started: ${STARTED:-Unknown}"
+        fi
     fi
 }
 
