@@ -492,10 +492,14 @@ EOF
     echo "Creating cn=config directory structure..."
     mkdir -p "$CONFIG_DIR/slapd.d"
     
-    # The bootstrap process should have created the cn=config database
-    # But if not, we'll need to create a minimal one
-    if [ ! -f "$CONFIG_DIR/slapd.d/cn=config.ldif" ]; then
-        echo "Creating minimal cn=config structure..."
+    # Use slaptest to convert bootstrap config to cn=config format
+    echo "Converting configuration to cn=config format..."
+    if $LDAP_PREFIX/sbin/slaptest -f "$CONFIG_DIR/slapd-bootstrap.conf" -F "$CONFIG_DIR/slapd.d" 2>/dev/null; then
+        echo "Configuration conversion successful"
+    else
+        echo "Configuration conversion failed, creating minimal config..."
+        # Create minimal cn=config structure manually
+        mkdir -p "$CONFIG_DIR/slapd.d/cn=config"
         cat > "$CONFIG_DIR/slapd.d/cn=config.ldif" << EOF
 dn: cn=config
 objectClass: olcGlobal
@@ -508,6 +512,30 @@ olcTLSCertificateFile: $SSL_DIR/server.crt
 olcTLSCertificateKeyFile: $SSL_DIR/server.key
 olcTLSVerifyClient: never
 structuralObjectClass: olcGlobal
+EOF
+
+        cat > "$CONFIG_DIR/slapd.d/cn=config/olcDatabase={0}config.ldif" << EOF
+dn: olcDatabase={0}config
+objectClass: olcDatabaseConfig
+olcDatabase: {0}config
+olcRootDN: cn=config
+olcRootPW: secret
+structuralObjectClass: olcDatabaseConfig
+EOF
+
+        cat > "$CONFIG_DIR/slapd.d/cn=config/olcDatabase={1}mdb.ldif" << EOF
+dn: olcDatabase={1}mdb
+objectClass: olcDatabaseConfig
+objectClass: olcMdbConfig
+olcDatabase: {1}mdb
+olcSuffix: dc=my-domain,dc=com
+olcRootDN: cn=Manager,dc=my-domain,dc=com
+olcRootPW: secret
+olcDbDirectory: $DATA_DIR
+olcDbMaxSize: 1073741824
+olcDbIndex: objectClass eq
+olcDbIndex: entryExpireTimestamp eq
+structuralObjectClass: olcMdbConfig
 EOF
     fi
 }
@@ -624,7 +652,25 @@ case "$ACTION" in
         echo "Testing PHP compatibility for $INSTANCE_NAME..."
         source "$CONFIG_DIR/ldap_env.sh" >/dev/null 2>&1
         
+        echo "Debug: Environment variables:"
+        echo "  LDAP_TEST_PORT=$LDAP_TEST_PORT"
+        echo "  LDAP_TEST_USER=$LDAP_TEST_USER"
+        echo "  LDAP_TEST_PASSWD=$LDAP_TEST_PASSWD"
+        echo ""
+        
         echo "1. Testing LDAP connection (port $LDAP_PORT):"
+        echo "Command: $LDAP_PREFIX/bin/ldapsearch -H ldap://localhost:$LDAP_PORT -D \"cn=Manager,dc=my-domain,dc=com\" -w secret -b \"dc=my-domain,dc=com\" \"(objectClass=*)\" dn"
+        
+        # First test basic connectivity without bind
+        echo "1a. Testing anonymous connection:"
+        $LDAP_PREFIX/bin/ldapsearch -H "ldap://localhost:$LDAP_PORT" -x -s base -b "" "(objectClass=*)" || echo "Anonymous connection failed"
+        
+        echo ""
+        echo "1b. Checking what entries exist in the database:"
+        $LDAP_PREFIX/bin/ldapsearch -H "ldap://localhost:$LDAP_PORT" -x -b "dc=my-domain,dc=com" "(objectClass=*)" dn || echo "Could not search base DN"
+        
+        echo ""
+        echo "1c. Testing with manager bind:"
         $LDAP_PREFIX/bin/ldapsearch -H "ldap://localhost:$LDAP_PORT" -D "cn=Manager,dc=my-domain,dc=com" -w secret -b "dc=my-domain,dc=com" "(objectClass=*)" dn
         
         echo ""
