@@ -159,6 +159,11 @@ init_config() {
 # Bootstrap configuration for $INSTANCE_NAME
 include $LDAP_PREFIX/etc/openldap/schema/core.schema
 
+# Load required modules
+modulepath $LDAP_PREFIX/libexec/openldap
+moduleload back_mdb
+moduleload back_config
+
 pidfile $RUN_DIR/slapd.pid
 argsfile $RUN_DIR/slapd.args
 
