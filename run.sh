@@ -1,4 +1,5 @@
 #!/bin/bash
+
 set -e
 
 # OpenLDAP Version Manager Script
@@ -6,16 +7,19 @@ set -e
 # Example: ./start_ldap.sh openldap-2.6 30 start
 
 if [ $# -lt 2 ]; then
-    echo "Usage: $0 <ldap_version> <action> [ssl_version]"
+    echo "Usage: $0 <ldap_version> <action> [ssl_version] [options]"
     echo "  ldap_version: e.g., openldap-2.6, openldap-2.5"
-    echo "  action:       start|stop|restart|status|clean|test"
+    echo "  action:       start|stop|restart|status|clean|test|reset"
     echo "  ssl_version:  SSL version (default: 30)"
+    echo "  options:      --reset (clean data/certs before start)"
     echo ""
     echo "Examples:"
-    echo "  $0 openldap-2.6 start     # Start with SSL30 (foreground)"
+    echo "  $0 openldap-2.6 start     # Start with SSL30 (reuse existing data)"
+    echo "  $0 openldap-2.6 start 30 --reset # Clean start with SSL30"
     echo "  $0 openldap-2.5 start 31  # Start with SSL31"  
     echo "  $0 openldap-2.6 stop      # Stop specific version"
-    echo "  $0 openldap-2.6 clean     # Clean and restart"
+    echo "  $0 openldap-2.6 clean     # Clean data/config"
+    echo "  $0 openldap-2.6 reset     # Clean and restart"
     echo "  $0 openldap-2.6 test      # Test PHP compatibility"
     echo ""
     echo "Local directories used:"
@@ -28,6 +32,15 @@ fi
 LDAP_VERSION="$1"
 ACTION="$2"
 SSL_VERSION="${3:-30}"
+RESET_FLAG=""
+
+# Check for --reset flag
+if [ "$4" = "--reset" ] || [ "$3" = "--reset" ]; then
+    RESET_FLAG="--reset"
+    if [ "$3" = "--reset" ]; then
+        SSL_VERSION="30"
+    fi
+fi
 
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,28 +53,66 @@ DATA_DIR="$SCRIPT_DIR/data/$INSTANCE_NAME"
 CONFIG_DIR="$SCRIPT_DIR/etc/$INSTANCE_NAME"
 SSL_DIR="$CONFIG_DIR/ssl"
 RUN_DIR="$SCRIPT_DIR/run/$INSTANCE_NAME"
+STATE_FILE="$RUN_DIR/instance.state"
 
-# Use PHP test default ports
-LDAP_PORT=389
-LDAPS_PORT=636
+# Function to save instance state
+save_state() {
+    mkdir -p "$RUN_DIR"
+    cat > "$STATE_FILE" << EOF
+LDAP_PORT=$LDAP_PORT
+LDAPS_PORT=$LDAPS_PORT
+LDAPI_SOCKET=$LDAPI_SOCKET
+LDAPI_URL=$LDAPI_URL
+INSTANCE_NAME=$INSTANCE_NAME
+LDAP_PREFIX=$LDAP_PREFIX
+SSL_VERSION=$SSL_VERSION
+STARTED=$(date '+%Y-%m-%d %H:%M:%S')
+PID=$(get_slapd_pid)
+EOF
+}
 
-# If default ports are in use, add offset for different versions
-if [ "$LDAP_VERSION" != "$(ls /usr/local/ldap/ | head -1)" ] && netstat -ln 2>/dev/null | grep -q ":$LDAP_PORT "; then
-    case "$LDAP_VERSION" in
-        *2.5*) PORT_OFFSET=0 ;;
-        *2.6*) PORT_OFFSET=10 ;;
-        *2.7*) PORT_OFFSET=20 ;;
-        *) PORT_OFFSET=30 ;;
-    esac
-    LDAP_PORT=$((3389 + PORT_OFFSET))
-    LDAPS_PORT=$((6363 + PORT_OFFSET))
-    echo "Note: Using alternate ports $LDAP_PORT/$LDAPS_PORT (default ports busy)"
-fi
-LDAPI_SOCKET="$RUN_DIR/ldapi"
-# Properly encode LDAPI path for URL
-LDAPI_URL="ldapi://$(echo "$LDAPI_SOCKET" | sed 's|/|%2F|g')"
+# Function to load instance state
+load_state() {
+    if [ -f "$STATE_FILE" ]; then
+        source "$STATE_FILE"
+        return 0
+    else
+        return 1
+    fi
+}
 
-# Check if LDAP installation exists
+# Function to get ports (either from state or calculate new ones)
+get_ports() {
+    # Try to load existing state first
+    if load_state && [ -n "$LDAP_PORT" ] && [ -n "$LDAPS_PORT" ]; then
+        echo "Using saved ports: LDAP=$LDAP_PORT, LDAPS=$LDAPS_PORT"
+        return 0
+    fi
+    
+    # Calculate new ports
+    LDAP_PORT=389
+    LDAPS_PORT=636
+
+    # If default ports are in use, add offset for different versions
+    if [ "$LDAP_VERSION" != "$(ls /usr/local/ldap/ | head -1)" ] && netstat -ln 2>/dev/null | grep -q ":$LDAP_PORT "; then
+        case "$LDAP_VERSION" in
+            *2.5*) PORT_OFFSET=0 ;;
+            *2.6*) PORT_OFFSET=10 ;;
+            *2.7*) PORT_OFFSET=20 ;;
+            *) PORT_OFFSET=30 ;;
+        esac
+        LDAP_PORT=$((3389 + PORT_OFFSET))
+        LDAPS_PORT=$((6363 + PORT_OFFSET))
+        echo "Note: Using alternate ports $LDAP_PORT/$LDAPS_PORT (default ports busy)"
+    fi
+    
+    LDAPI_SOCKET="$RUN_DIR/ldapi"
+    LDAPI_URL="ldapi://$(echo "$LDAPI_SOCKET" | sed 's|/|%2F|g')"
+}
+
+# Initialize ports
+get_ports
+
 if [ ! -x "$LDAP_PREFIX/libexec/slapd" ]; then
     echo "Error: LDAP installation not found at $LDAP_PREFIX"
     echo "Please build and install OpenLDAP first."
@@ -101,6 +152,9 @@ stop_slapd() {
             kill -9 "$pid"
         fi
         echo "$INSTANCE_NAME stopped."
+        
+        # Clean up state file
+        rm -f "$STATE_FILE"
     else
         echo "$INSTANCE_NAME is not running."
     fi
@@ -116,6 +170,12 @@ clean_instance() {
 
 # Function to generate TLS certificate
 generate_cert() {
+    # Skip if certificate exists and not resetting
+    if [ -f "$SSL_DIR/server.crt" ] && [ "$RESET_FLAG" != "--reset" ]; then
+        echo "Reusing existing TLS certificate"
+        return 0
+    fi
+    
     echo "Generating TLS certificate for $INSTANCE_NAME..."
     
     # Helper function for certificate alt names
@@ -451,6 +511,13 @@ start_slapd() {
         return 0
     fi
     
+    # Handle reset flag
+    if [ "$RESET_FLAG" = "--reset" ]; then
+        echo "Reset flag detected - cleaning existing data..."
+        stop_slapd
+        rm -rf "$DATA_DIR" "$CONFIG_DIR/slapd.d" "$SSL_DIR"
+    fi
+    
     echo "Starting $INSTANCE_NAME in foreground..."
     echo "  LDAP:  ldap://localhost:$LDAP_PORT"
     echo "  LDAPS: ldaps://localhost:$LDAPS_PORT"
@@ -467,7 +534,13 @@ start_slapd() {
         init_config
         bootstrap_config
         echo ""
+    else
+        echo "Reusing existing configuration and data"
+        echo ""
     fi
+    
+    # Save state before starting
+    save_state
     
     # Start slapd in foreground with debug output
     exec $LDAP_PREFIX/libexec/slapd \
@@ -521,8 +594,15 @@ case "$ACTION" in
         echo "Run '$0 $LDAP_VERSION start $SSL_VERSION' to reinitialize."
         ;;
     test)
+        # Load state to get correct ports
+        if ! load_state; then
+            echo "Error: No saved state found for $INSTANCE_NAME. Has it been started?"
+            exit 1
+        fi
+        
         if ! is_running; then
             echo "Error: $INSTANCE_NAME is not running. Start it first."
+            echo "Last started: ${STARTED:-Unknown}"
             exit 1
         fi
         
@@ -547,9 +627,16 @@ case "$ACTION" in
         echo "  LDAP_TEST_USER=$LDAP_TEST_USER"
         echo "  LDAP_TEST_PASSWD=$LDAP_TEST_PASSWD"
         ;;
+    reset)
+        echo "Resetting $INSTANCE_NAME..."
+        clean_instance
+        echo "Starting fresh instance..."
+        RESET_FLAG="--reset"
+        start_slapd
+        ;;
     *)
         echo "Unknown action: $ACTION"
-        echo "Valid actions: start, stop, restart, status, clean, test"
+        echo "Valid actions: start, stop, restart, status, clean, test, reset"
         exit 1
         ;;
 esac
