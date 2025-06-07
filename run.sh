@@ -173,6 +173,9 @@ loglevel -1
 database config
 rootdn "cn=config"
 rootpw secret
+# Allow EXTERNAL SASL to have admin access
+authz-regexp uid=([^,]*),cn=gssapi,cn=auth cn=$1,cn=config
+authz-regexp gidNumber=0\\\+uidNumber=0,cn=peercred,cn=external,cn=auth cn=config
 
 # Main database
 database mdb
@@ -392,12 +395,16 @@ EOF
 
     # Configure database index
     echo "Configuring database index..."
-    $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
+    if [ -n "$DBDN" ] && [ "$DBDN" != "" ]; then
+        $LDAP_PREFIX/bin/ldapmodify -Q -Y EXTERNAL -H "$LDAPI_URL" << EOF || true
 dn: $DBDN
 changetype: modify
 add: olcDbIndex
 olcDbIndex: entryExpireTimestamp eq
 EOF
+    else
+        echo "Skipping index configuration - no valid database DN found"
+    fi
 
     # Add base entry - exactly as in PHP CI script
     $LDAP_PREFIX/bin/ldapadd -H "$LDAPI_URL" -D cn=Manager,dc=my-domain,dc=com -w secret << EOF || true
@@ -412,10 +419,29 @@ EOF
     # Add PHP test data
     add_php_test_data
 
-    # Stop bootstrap slapd
+    # Stop bootstrap slapd and create slapd.d directory
     echo "Stopping bootstrap slapd..."
     kill $bootstrap_pid
     wait $bootstrap_pid 2>/dev/null || true
+    
+    # Create cn=config directory structure for final startup
+    echo "Creating cn=config directory structure..."
+    mkdir -p "$CONFIG_DIR/slapd.d"
+    
+    # The bootstrap process should have created the cn=config database
+    # But if not, we'll need to create a minimal one
+    if [ ! -f "$CONFIG_DIR/slapd.d/cn=config.ldif" ]; then
+        echo "Creating minimal cn=config structure..."
+        cat > "$CONFIG_DIR/slapd.d/cn=config.ldif" << EOF
+dn: cn=config
+objectClass: olcGlobal
+cn: config
+olcArgsFile: $RUN_DIR/slapd.args
+olcPidFile: $RUN_DIR/slapd.pid
+olcLogLevel: -1
+structuralObjectClass: olcGlobal
+EOF
+    fi
 }
 
 # Function to start slapd
