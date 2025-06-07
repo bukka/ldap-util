@@ -228,6 +228,12 @@ argsfile $RUN_DIR/slapd.args
 
 loglevel -1
 
+# TLS Configuration
+TLSCACertificateFile $SSL_DIR/server.crt
+TLSCertificateFile $SSL_DIR/server.crt
+TLSCertificateKeyFile $SSL_DIR/server.key
+TLSVerifyClient never
+
 # Config database
 database config
 rootdn "cn=config"
@@ -496,6 +502,7 @@ EOF
     echo "Converting configuration to cn=config format..."
     if $LDAP_PREFIX/sbin/slaptest -f "$CONFIG_DIR/slapd-bootstrap.conf" -F "$CONFIG_DIR/slapd.d" 2>/dev/null; then
         echo "Configuration conversion successful"
+        # Don't modify the converted config - slaptest should preserve all settings from bootstrap
     else
         echo "Configuration conversion failed, creating minimal config..."
         # Create minimal cn=config structure manually
@@ -511,6 +518,7 @@ olcTLSCACertificateFile: $SSL_DIR/server.crt
 olcTLSCertificateFile: $SSL_DIR/server.crt
 olcTLSCertificateKeyFile: $SSL_DIR/server.key
 olcTLSVerifyClient: never
+olcAuthzRegexp: uid=usera,cn=digest-md5,cn=auth cn=usera,dc=my-domain,dc=com
 structuralObjectClass: olcGlobal
 EOF
 
