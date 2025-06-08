@@ -233,6 +233,7 @@ TLSCACertificateFile $SSL_DIR/server.crt
 TLSCertificateFile $SSL_DIR/server.crt
 TLSCertificateKeyFile $SSL_DIR/server.key
 TLSVerifyClient never
+TLSProtocolMin 3.3
 
 # Config database
 database config
